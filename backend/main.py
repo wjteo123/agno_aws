@@ -1,4 +1,5 @@
-# main.py
+# main.py - Complete CORS fix with debugging
+
 import os
 import json
 import uvicorn
@@ -21,19 +22,15 @@ from websocket_manager import manager
 from utils import _run_and_extract
 from knowledge_manager import KnowledgeManager
 
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
     Load the SentenceTransformer model on startup and clean up on shutdown.
     """
     logger.info("Loading SentenceTransformer model...")
-    # The embedder is already initialized in config.py, 
-    # so we just need to make it available to the app
     app.state.embedder = embedder
     logger.info("SentenceTransformer model loaded and ready.")
     yield
-    # Clean up resources if needed on shutdown
     logger.info("Application shutting down...")
 
 app = FastAPI(
@@ -42,13 +39,49 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# COMPREHENSIVE CORS CONFIGURATION
+# Allow all common variations of your frontend URL
+allowed_origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000", 
+    "http://54.196.245.115:3000",
+    "https://54.196.245.115:3000",
+    FRONTEND_URL,  # From your environment variable
+]
+
+# Remove any None values and duplicates
+allowed_origins = list(set([origin for origin in allowed_origins if origin]))
+
+print(f"CORS allowed origins: {allowed_origins}")  # Debug print
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL, "http://localhost:3000"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
+
+# Add a middleware to log CORS requests for debugging
+@app.middleware("http")
+async def cors_debug_middleware(request: Request, call_next):
+    origin = request.headers.get("origin")
+    method = request.method
+    
+    print(f"Request: {method} {request.url}")
+    print(f"Origin: {origin}")
+    print(f"Headers: {dict(request.headers)}")
+    
+    if method == "OPTIONS":
+        print("Handling OPTIONS (preflight) request")
+    
+    response = await call_next(request)
+    
+    print(f"Response status: {response.status_code}")
+    print(f"Response headers: {dict(response.headers)}")
+    
+    return response
 
 knowledge_manager = KnowledgeManager()
 
@@ -59,7 +92,8 @@ async def root():
     return {
         "message": "Legal Multi-Agent System API with Knowledge Base", 
         "version": "2.0.0",
-        "features": ["Multi-Agent Legal Assistance", "Knowledge Base Search", "Document Processing"]
+        "features": ["Multi-Agent Legal Assistance", "Knowledge Base Search", "Document Processing"],
+        "cors_origins": allowed_origins  # Include this for debugging
     }
 
 @app.get("/agents")
@@ -81,7 +115,6 @@ async def process_query(request: QueryRequest):
         agent_or_team.session_id = request.session_id
         agent_or_team.user_id = request.user_id
 
-        # Log knowledge search for monitoring
         logger.info(f"Processing query with knowledge search enabled: {request.message[:100]}...")
 
         content, tool_calls = _run_and_extract(agent_or_team, request.message, stream=False)
@@ -95,30 +128,6 @@ async def process_query(request: QueryRequest):
         )
     except Exception as e:
         logger.exception("Error in /query")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/query/stream")
-async def process_query_stream(request: QueryRequest):
-    try:
-        agent_or_team = legal_system.team if request.agent_type == "team" else legal_system.agents.get(request.agent_type)
-        if not agent_or_team:
-            raise HTTPException(status_code=400, detail="Invalid agent type")
-        
-        agent_name = "Legal Team" if request.agent_type == "team" else agent_or_team.name
-        agent_or_team.session_id = request.session_id
-        agent_or_team.user_id = request.user_id
-
-        def generate_response():
-            run_iter, _ = _run_and_extract(agent_or_team, request.message, stream=True)
-            for chunk in run_iter:
-                chunk_content = getattr(chunk, "content", "")
-                if chunk_content:
-                    yield f"data: {json.dumps({'content': chunk_content, 'agent': agent_name})}\n\n"
-            yield f"data: {json.dumps({'done': True})}\n\n"
-
-        return StreamingResponse(generate_response(), media_type="text/event-stream")
-    except Exception as e:
-        logger.exception("Error in /query/stream")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/sessions/{session_id}/history")
@@ -141,14 +150,24 @@ async def get_user_memories(user_id: str):
         logger.exception("Error fetching user memories")
         raise HTTPException(status_code=500, detail=str(e))
 
+# ADD OPTIONS handler for preflight requests
+@app.options("/knowledge/upload")
+async def upload_options():
+    return {"message": "OK"}
+
 @app.post("/knowledge/upload")
 async def upload_document(
+    request: Request,  # Add request parameter for debugging
     file: UploadFile = File(...),
     document_type: str = Form(...),
     category: str = Form(default="general")
 ):
     """Upload a new document to the knowledge base."""
     try:
+        # Debug logging
+        print(f"Upload request received from: {request.headers.get('origin')}")
+        print(f"File: {file.filename}, Type: {document_type}, Category: {category}")
+        
         # Validate file type
         allowed_types = {
             'pdf': ['.pdf'],
